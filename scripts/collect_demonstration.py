@@ -254,7 +254,7 @@ if __name__ == "__main__":
     parser.add_argument("--bddl-file", type=str)
 
     parser.add_argument("--vendor-id", type=int, default=9583)
-    parser.add_argument("--product-id", type=int, default=50734)
+    parser.add_argument("--product-id", type=int, default=50741)
 
     args = parser.parse_args()
 
@@ -312,9 +312,10 @@ if __name__ == "__main__":
         device = Keyboard(
             pos_sensitivity=args.pos_sensitivity, rot_sensitivity=args.rot_sensitivity
         )
-        env.viewer.add_keypress_callback("any", device.on_press)
-        env.viewer.add_keyup_callback("any", device.on_release)
-        env.viewer.add_keyrepeat_callback("any", device.on_press)
+        # env.viewer.add_keypress_callback("any", device.on_press)
+        # env.viewer.add_keyup_callback("any", device.on_release)
+        # env.viewer.add_keyrepeat_callback("any", device.on_press)
+        env.viewer.add_keypress_callback(device.on_press)
     elif args.device == "spacemouse":
         from robosuite.devices import SpaceMouse
 

@@ -1,5 +1,9 @@
 UBUNTU
 
+
+Use my fork of robosuite here: and install the libero branch https://github.com/OliEfr/robosuite/tree/libero
+(This should replace default robosuite install in libero!)
+
 Follow the install instructions here: https://github.com/NVlabs/spacemouse-extension (incl pip install hidapi)
 Debugging, for me this helped: https://github.com/JakubAndrysek/PySpaceMouse and https://github.com/JakubAndrysek/PySpaceMouse/blob/master/troubleshooting.md
 

@@ -1,5 +1,6 @@
 import argparse
 import cv2
+import keyboard
 import datetime
 import h5py
 import init_path
@@ -17,6 +18,71 @@ from robosuite.utils.input_utils import input2action
 import libero.libero.envs.bddl_utils as BDDLUtils
 from libero.libero.envs import *
 
+from pynput import keyboard
+import threading
+
+class KeyboardInputManager:
+    """Manages the pynput listener and provides a thread-safe flag."""
+    
+    def __init__(self):
+        # 1. The shared flag to signal an 'A' press
+        self.a_pressed_event = threading.Event()
+        self.r_pressed_event = threading.Event()
+        
+        # 2. Setup the listener
+        self.listener = keyboard.Listener(
+            on_press=self._on_press,
+            on_release=self._on_release
+        )
+        # Allows the main program to exit without waiting for the listener thread
+        self.listener.daemon = True 
+        self.listener.start()
+        
+    def _on_press(self, key):
+        """Called by the listener thread when a key is pressed."""
+        try:
+            if key.char == 'a':
+                # Set the event flag
+                self.a_pressed_event.set()
+            if key.char == 'r':
+                # Set the event flag
+                self.r_pressed_event.set()
+        except AttributeError:
+            # Handle special keys if needed
+            pass
+
+    def _on_release(self, key):
+        """Called by the listener thread when a key is released."""
+        # You can handle key releases here if your logic requires it
+        pass
+        
+    def check_a_pressed(self):
+        """Checks the flag and immediately clears it for the next check."""
+        # check() returns True if the flag is set
+        is_set = self.a_pressed_event.is_set()
+        
+        # clear() resets the flag immediately so we only register one press per keydown
+        if is_set:
+            self.a_pressed_event.clear()
+            
+        return is_set
+    
+    def check_r_pressed(self):
+        """Checks the flag and immediately clears it for the next check."""
+        # check() returns True if the flag is set
+        is_set = self.r_pressed_event.is_set()
+        
+        # clear() resets the flag immediately so we only register one press per keydown
+        if is_set:
+            self.r_pressed_event.clear()
+            
+        return is_set
+
+    def stop(self):
+        """Stops the listener thread cleanly."""
+        self.listener.stop()
+
+input_manager = KeyboardInputManager()
 
 def collect_human_trajectory(
     env, device, arm, env_configuration, problem_info, remove_directory=[]
@@ -52,6 +118,8 @@ def collect_human_trajectory(
     # Loop until we get a reset from the input or the task completes
     saving = True
     count = 0
+    a_has_been_pressed = False # press a for completing the task
+
 
     while True:
         count += 1
@@ -85,13 +153,21 @@ def collect_human_trajectory(
             break
 
         # state machine to check for having a success for 10 consecutive timesteps
-        if env._check_success():
-            if task_completion_hold_count > 0:
-                task_completion_hold_count -= 1  # latched state, decrement count
+        # pressing a once should be sufficient to trigger task completion
+        if input_manager.check_a_pressed() or a_has_been_pressed:
+            if env.started_new_episode:   
+                a_has_been_pressed = True
+                if task_completion_hold_count > 0:
+                    task_completion_hold_count -= 1  # latched state, decrement count
+                else:
+                    task_completion_hold_count = 10  # reset count on first success timestep
             else:
-                task_completion_hold_count = 10  # reset count on first success timestep
+                print("Start recording first before indicating success!")
         else:
             task_completion_hold_count = -1  # null the counter if there's no success
+
+        if input_manager.check_r_pressed():
+            env._start_new_episode()
 
     print(count)
     # cleanup for end of data collection episodes
@@ -223,7 +299,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--camera",
         type=str,
-        default="agentview",
+        default="robot0_eye_in_hand",
         help="Which camera to use for collecting demos",
     )
     parser.add_argument(

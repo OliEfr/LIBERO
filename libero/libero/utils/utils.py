@@ -35,6 +35,7 @@ def postprocess_model_xml(xml_str, cameras_dict={}):
     all_elements = meshes + textures
 
     for elem in all_elements:
+        continue # for olivers installation this is not required
         old_path = elem.get("file")
         if old_path is None:
             continue

@@ -47,6 +47,8 @@ def main():
 
     args = parser.parse_args()
 
+    args.use_actions, args.use_camera_obs = True, True # NOTE args.use_camera_obs is True, the env is not rendered.
+
     hdf5_path = args.demo_file
     f = h5py.File(hdf5_path, "r")
     env_name = f["data"].attrs["env"]
@@ -65,7 +67,7 @@ def main():
     bddl_file_name = f["data"].attrs["bddl_file_name"]
 
     bddl_file_dir = os.path.dirname(bddl_file_name)
-    replace_bddl_prefix = "/".join(bddl_file_dir.split("bddl_files/")[:-1] + "bddl_files")
+    replace_bddl_prefix = "/".join(bddl_file_dir.split("bddl_files/")[:-1][0] + "bddl_files")
 
     hdf5_path = os.path.join(get_libero_path("datasets"), bddl_file_dir.split("bddl_files/")[-1].replace(".bddl", "_demo.hdf5"))
 
@@ -212,7 +214,6 @@ def main():
             robot_states.append(env.get_robot_state_vector(obs))
 
             if args.use_camera_obs:
-
                 if args.use_depth:
                     agentview_depths.append(obs["agentview_depth"])
                     eye_in_hand_depths.append(obs["robot0_eye_in_hand_depth"])
@@ -230,7 +231,8 @@ def main():
         rewards = np.zeros(len(actions)).astype(np.uint8)
         rewards[-1] = 1
         print(len(actions), len(agentview_images))
-        assert len(actions) == len(agentview_images)
+        if args.use_camera_obs:
+            assert len(actions) == len(agentview_images)
         print(len(actions))
 
         ep_data_grp = grp.create_group(f"demo_{i}")
@@ -245,8 +247,9 @@ def main():
             obs_grp.create_dataset("ee_pos", data=np.stack(ee_states, axis=0)[:, :3])
             obs_grp.create_dataset("ee_ori", data=np.stack(ee_states, axis=0)[:, 3:])
 
-        obs_grp.create_dataset("agentview_rgb", data=np.stack(agentview_images, axis=0))
-        obs_grp.create_dataset(
+        if args.use_camera_obs:
+            obs_grp.create_dataset("agentview_rgb", data=np.stack(agentview_images, axis=0))
+            obs_grp.create_dataset(
             "eye_in_hand_rgb", data=np.stack(eye_in_hand_images, axis=0)
         )
         if args.use_depth:

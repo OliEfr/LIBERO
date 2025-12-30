@@ -44,9 +44,6 @@ class KeyboardInputManager:
             if key.char == 'a':
                 # Set the event flag
                 self.a_pressed_event.set()
-            if key.char == 'r':
-                # Set the event flag
-                self.r_pressed_event.set()
         except AttributeError:
             # Handle special keys if needed
             pass
@@ -66,17 +63,7 @@ class KeyboardInputManager:
             self.a_pressed_event.clear()
             
         return is_set
-    
-    def check_r_pressed(self):
-        """Checks the flag and immediately clears it for the next check."""
-        # check() returns True if the flag is set
-        is_set = self.r_pressed_event.is_set()
-        
-        # clear() resets the flag immediately so we only register one press per keydown
-        if is_set:
-            self.r_pressed_event.clear()
-            
-        return is_set
+
 
     def stop(self):
         """Stops the listener thread cleanly."""
@@ -118,7 +105,7 @@ def collect_human_trajectory(
     # Loop until we get a reset from the input or the task completes
     saving = True
     count = 0
-    a_has_been_pressed = False # press a for completing the task
+    a_has_been_pressed = False
 
 
     while True:
@@ -155,24 +142,29 @@ def collect_human_trajectory(
         # state machine to check for having a success for 10 consecutive timesteps
         # pressing a once should be sufficient to trigger task completion
         if input_manager.check_a_pressed() or a_has_been_pressed:
-            if env.started_new_episode:   
-                a_has_been_pressed = True
+            a_has_been_pressed = True
+            # start recording if not running already
+            if not env.started_new_episode: 
+                env._start_new_episode()
+                a_has_been_pressed = False
+            # if pressed again: save recording
+            else:
                 if task_completion_hold_count > 0:
                     task_completion_hold_count -= 1  # latched state, decrement count
                 else:
-                    task_completion_hold_count = 10  # reset count on first success timestep
-            else:
-                print("Start recording first before indicating success!")
+                    task_completion_hold_count = 30  # reset count on first success timestep; control_freq=20, so ~1.5 sec
         else:
             task_completion_hold_count = -1  # null the counter if there's no success
-
-        if input_manager.check_r_pressed():
-            env._start_new_episode()
+            
 
     print(count)
     # cleanup for end of data collection episodes
     if not saving:
-        remove_directory.append(env.ep_directory.split("/")[-1])
+        try:
+            remove_directory.append(env.ep_directory.split("/")[-1])
+        except:
+            # most likely path does not exist because recording was not started
+            pass
     env.close()
     return saving
 

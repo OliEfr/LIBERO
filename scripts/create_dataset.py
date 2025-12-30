@@ -17,6 +17,14 @@ from robosuite.utils import camera_utils
 from libero.libero.envs import *
 from libero.libero import get_libero_path
 
+
+"""
+You should only need to change --demo-file argument. Call like this:
+
+python scripts/create_dataset.py --demo-file demonstration_data/.../demo.hdf5
+
+"""
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--demo-file", default="demo.hdf5")
@@ -47,7 +55,9 @@ def main():
 
     args = parser.parse_args()
 
-    args.use_actions, args.use_camera_obs = True, True # NOTE args.use_camera_obs is True, the env is not rendered.
+    args.use_actions = True
+    args.use_camera_obs = True # NOTE set args.use_camera_obs to False for vizualization, and False for saving the dataset.
+    episodes_to_skip = ["demo_1", "demo_19", "demo_31"]
 
     hdf5_path = args.demo_file
     f = h5py.File(hdf5_path, "r")
@@ -70,6 +80,7 @@ def main():
     replace_bddl_prefix = "/".join(bddl_file_dir.split("bddl_files/")[:-1][0] + "bddl_files")
 
     hdf5_path = os.path.join(get_libero_path("datasets"), bddl_file_dir.split("bddl_files/")[-1].replace(".bddl", "_demo.hdf5"))
+    print("Saving dataset to ", hdf5_path)
 
     output_parent_dir = Path(hdf5_path).parent
     output_parent_dir.mkdir(parents=True, exist_ok=True)
@@ -126,6 +137,11 @@ def main():
 
     for (i, ep) in enumerate(demos):
         print("Playing back random episode... (press ESC to quit)")
+
+        if ep in episodes_to_skip:
+            print(f"Skipping episode {ep}")
+            continue
+        print(f"Processing episode {ep} number {i}")
 
         # # select an episode randomly
         # read the model xml, using the metadata stored in the attribute for this episode
@@ -186,7 +202,7 @@ def main():
 
                 if err > 0.01:
                     print(
-                        f"[warning] playback diverged by {err:.2f} for ep {ep} at step {j}"
+                        f"[warning] playback diverged by {err:.2f} for ep {ep} number {i} at step {j}"
                     )
 
             # Skip recording because the force sensor is not stable in

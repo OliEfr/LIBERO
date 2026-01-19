@@ -14,6 +14,8 @@ from robosuite import load_controller_config
 from robosuite.wrappers import DataCollectionWrapper, VisualizationWrapper
 from robosuite.utils.input_utils import input2action
 
+from libero.success_functions import lift_white_yellow_mug, false, lift_white_yellow_mug_and_place_on_plate
+is_success = false
 
 import libero.libero.envs.bddl_utils as BDDLUtils
 from libero.libero.envs import *
@@ -21,14 +23,21 @@ from libero.libero.envs import *
 from pynput import keyboard
 import threading
 
+# Configurable subtask states for demonstration collection
+# Cycle starts at "0", then goes through each subtask in this list
+# Final 'l' press after last subtask sends task completion signal
+SUBTASK_STATES = ["place"]
+
 class KeyboardInputManager:
     """Manages the pynput listener and provides a thread-safe flag."""
     
     def __init__(self):
         # 1. The shared flag to signal an 'A' press
-        self.a_pressed_event = threading.Event()
-        self.r_pressed_event = threading.Event()
-        
+        self.task_completion_key_pressed = threading.Event()
+        self.gripper_trigger_key_pressed = threading.Event()
+        self.subtask_cycle_key_pressed = threading.Event()
+        self.current_subtask_index = -1  # Start at -1, so first press gives index 0
+
         # 2. Setup the listener
         self.listener = keyboard.Listener(
             on_press=self._on_press,
@@ -41,9 +50,18 @@ class KeyboardInputManager:
     def _on_press(self, key):
         """Called by the listener thread when a key is pressed."""
         try:
-            if key.char == 'a':
+            if key.char == 'p':
                 # Set the event flag
-                self.a_pressed_event.set()
+                self.task_completion_key_pressed.set()
+            if key.char == 'g':
+                # Set the event flag
+                if self.gripper_trigger_key_pressed.is_set():
+                    self.gripper_trigger_key_pressed.clear()
+                else:
+                    self.gripper_trigger_key_pressed.set()
+            if key.char == 'l':
+                # Set the event flag for subtask cycling
+                self.subtask_cycle_key_pressed.set()
         except AttributeError:
             # Handle special keys if needed
             pass
@@ -53,17 +71,64 @@ class KeyboardInputManager:
         # You can handle key releases here if your logic requires it
         pass
         
-    def check_a_pressed(self):
+    def check_task_completion_signal(self):
         """Checks the flag and immediately clears it for the next check."""
         # check() returns True if the flag is set
-        is_set = self.a_pressed_event.is_set()
-        
+        is_set = self.task_completion_key_pressed.is_set()
+
         # clear() resets the flag immediately so we only register one press per keydown
         if is_set:
-            self.a_pressed_event.clear()
-            
+            self.task_completion_key_pressed.clear()
+
         return is_set
 
+    def cycle_subtask(self):
+        """Cycles through subtask states with zero states between transitions
+
+        Pattern: 0 -> subtask1 -> 0 -> subtask2 -> 0 -> ... -> subtaskN -> terminate
+
+        Returns:
+            tuple: (current_subtask, should_send_completion_signal)
+        """
+        is_set = self.subtask_cycle_key_pressed.is_set()
+
+        if is_set:
+            self.subtask_cycle_key_pressed.clear()
+            self.current_subtask_index += 1
+
+            # Check if this is a subtask index (even) or a return-to-zero index (odd)
+            if self.current_subtask_index % 2 == 0:
+                # Even index: this is an actual subtask
+                subtask_number = self.current_subtask_index // 2
+                if subtask_number < len(SUBTASK_STATES):
+                    print("Switched to subtask:", SUBTASK_STATES[subtask_number])
+                    return (SUBTASK_STATES[subtask_number], False)
+                else:
+                    # Shouldn't reach here, but handle gracefully
+                    self.current_subtask_index = -1
+                    return ("0", True)
+            else:
+                # Odd index: return to 0 or terminate
+                subtask_just_completed = (self.current_subtask_index - 1) // 2
+                if subtask_just_completed < len(SUBTASK_STATES) - 1:
+                    # Not the last subtask, return to 0
+                    print("Switched to subtask: 0")
+                    return ("0", False)
+                else:
+                    # Just completed the last subtask, terminate
+                    self.current_subtask_index = -1
+                    return ("0", True)
+
+        # Return current state without changes
+        if self.current_subtask_index == -1:
+            return ("0", False)
+        elif self.current_subtask_index % 2 == 0:
+            # Even index: in a subtask
+            subtask_number = self.current_subtask_index // 2
+            return (SUBTASK_STATES[subtask_number], False)
+        else:
+            # Odd index: in a 0 state between subtasks
+            return ("0", False)
 
     def stop(self):
         """Stops the listener thread cleanly."""
@@ -85,11 +150,13 @@ def collect_human_trajectory(
         arms (str): which arm to control (eg bimanual) 'right' or 'left'
         env_configuration (str): specified environment configuration
     """
-
     reset_success = False
     while not reset_success:
         try:
             env.reset()
+            input_manager.gripper_trigger_key_pressed.clear()
+            input_manager.current_subtask_index = -1  # Reset subtask index to beginning
+            env.current_subtask = "0"  # Initialize env subtask
             reset_success = True
         except:
             continue
@@ -105,7 +172,9 @@ def collect_human_trajectory(
     # Loop until we get a reset from the input or the task completes
     saving = True
     count = 0
-    a_has_been_pressed = False
+    received_task_completion_signal = False
+    env._start_new_episode() # auto-start new episode
+
 
 
     while True:
@@ -117,23 +186,36 @@ def collect_human_trajectory(
             else env.robots[arm == "left"]
         )
 
-        # Get the newest action
+        # Get the newest action of action[0:5] -- ee pose, action[6] gripper state (-1 open, 1 close)
         action, grasp = input2action(
             device=device,
             robot=active_robot,
             active_arm=arm,
             env_configuration=env_configuration,
         )
-
+        
         # If action is none, then this a reset so we should break
         if action is None:
             print("Break")
             saving = False
             break
 
+        # trigger gripper via keyboard; needs to be done after checking if action is None
+        action[-1] = 1.0 if input_manager.gripper_trigger_key_pressed.is_set() else -1.0
+
+
         # Run environment step
 
         env.step(action)
+
+        # Cycle through subtasks and update env
+        new_subtask, should_send_completion = input_manager.cycle_subtask()
+        env.current_subtask = new_subtask
+
+        # If 'l' was pressed after completing all subtasks, send completion signal
+        if should_send_completion:
+            received_task_completion_signal = True
+
         env.render()
         # Also break if we complete the task
         if task_completion_hold_count == 0:
@@ -141,18 +223,18 @@ def collect_human_trajectory(
 
         # state machine to check for having a success for 10 consecutive timesteps
         # pressing a once should be sufficient to trigger task completion
-        if input_manager.check_a_pressed() or a_has_been_pressed:
-            a_has_been_pressed = True
+        if input_manager.check_task_completion_signal() or received_task_completion_signal or is_success(env):
+            received_task_completion_signal = True
             # start recording if not running already
             if not env.started_new_episode: 
                 env._start_new_episode()
-                a_has_been_pressed = False
+                received_task_completion_signal = False
             # if pressed again: save recording
             else:
                 if task_completion_hold_count > 0:
                     task_completion_hold_count -= 1  # latched state, decrement count
                 else:
-                    task_completion_hold_count = 30  # reset count on first success timestep; control_freq=20, so ~1.5 sec
+                    task_completion_hold_count = 10  # reset count on first success timestep; control_freq=20, so ~1.5 sec
         else:
             task_completion_hold_count = -1  # null the counter if there's no success
             
@@ -216,6 +298,7 @@ def gather_demonstrations_as_hdf5(
         state_paths = os.path.join(directory, ep_directory, "state_*.npz")
         states = []
         actions = []
+        subtasks = []
 
         for state_file in sorted(glob(state_paths)):
             dic = np.load(state_file, allow_pickle=True)
@@ -224,6 +307,7 @@ def gather_demonstrations_as_hdf5(
             states.extend(dic["states"])
             for ai in dic["action_infos"]:
                 actions.append(ai["actions"])
+            subtasks.extend(dic["subtasks"])
 
         if len(states) == 0:
             continue
@@ -231,7 +315,8 @@ def gather_demonstrations_as_hdf5(
         # Delete the first actions and the last state. This is because when the DataCollector wrapper
         # recorded the states and actions, the states were recorded AFTER playing that action.
         del states[-1]
-        assert len(states) == len(actions)
+        del subtasks[-1]
+        assert len(states) == len(actions) == len(subtasks)
 
         num_eps += 1
         ep_data_grp = grp.create_group("demo_{}".format(num_eps))
@@ -245,6 +330,7 @@ def gather_demonstrations_as_hdf5(
         # write datasets for states and actions
         ep_data_grp.create_dataset("states", data=np.array(states))
         ep_data_grp.create_dataset("actions", data=np.array(actions))
+        ep_data_grp.create_dataset("subtasks", data=np.array(subtasks, dtype='S'))
 
     # write dataset attributes (metadata)
     now = datetime.datetime.now()

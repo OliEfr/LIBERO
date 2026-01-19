@@ -57,7 +57,7 @@ def main():
 
     args.use_actions = True
     args.use_camera_obs = True # NOTE set args.use_camera_obs to False for vizualization, and False for saving the dataset.
-    episodes_to_skip = ["demo_1", "demo_19", "demo_31"]
+    episodes_to_skip = [] # e.g. ["demo_1", "demo_19", "demo_31"]
 
     hdf5_path = args.demo_file
     f = h5py.File(hdf5_path, "r")
@@ -162,6 +162,7 @@ def main():
         # load the flattened mujoco states
         states = f["data/{}/states".format(ep)][()]
         actions = np.array(f["data/{}/actions".format(ep)][()])
+        subtasks = f["data/{}/subtasks".format(ep)][()].astype(str)
 
         num_actions = actions.shape[0]
 
@@ -194,16 +195,16 @@ def main():
 
             obs, reward, done, info = env.step(action)
 
-            if j < num_actions - 1:
+            # if j < num_actions - 1:
                 # ensure that the actions deterministically lead to the same recorded states
-                state_playback = env.sim.get_state().flatten()
+                # state_playback = env.sim.get_state().flatten()
                 # assert(np.all(np.equal(states[j + 1], state_playback)))
-                err = np.linalg.norm(states[j + 1] - state_playback)
+                # err = np.linalg.norm(states[j + 1] - state_playback)
 
-                if err > 0.01:
-                    print(
-                        f"[warning] playback diverged by {err:.2f} for ep {ep} number {i} at step {j}"
-                    )
+                # if err > 0.01:
+                #     print(
+                #         f"[warning] playback diverged by {err:.2f} for ep {ep} number {i} at step {j}"
+                #     )
 
             # Skip recording because the force sensor is not stable in
             # the beginning
@@ -242,6 +243,7 @@ def main():
         # end of one trajectory
         states = states[valid_index]
         actions = actions[valid_index]
+        subtasks = subtasks[valid_index]
         dones = np.zeros(len(actions)).astype(np.uint8)
         dones[-1] = 1
         rewards = np.zeros(len(actions)).astype(np.uint8)
@@ -276,6 +278,8 @@ def main():
                 "eye_in_hand_depth", data=np.stack(eye_in_hand_depths, axis=0)
             )
 
+        subtasks_bytes = subtasks.astype('S')  # Convert to byte strings
+        ep_data_grp.create_dataset("subtasks", data=subtasks_bytes)
         ep_data_grp.create_dataset("actions", data=actions)
         ep_data_grp.create_dataset("states", data=states)
         ep_data_grp.create_dataset("robot_states", data=np.stack(robot_states, axis=0))

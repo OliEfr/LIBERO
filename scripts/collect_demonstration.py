@@ -23,6 +23,60 @@ from libero.libero.envs import *
 from pynput import keyboard
 import threading
 
+# SAM3 and camera utilities for position estimation
+from libero.libero.utils.sam3_client import SAM3StreamClient
+from robosuite.utils.camera_utils import (
+    get_real_depth_map,
+    get_camera_transform_matrix,
+)
+
+def bilinear_interpolate(im, x, y):
+    """
+    Bilinear sampling for pixel coordinates x and y from source image im.
+    Taken from https://stackoverflow.com/questions/12729228/simple-efficient-bilinear-interpolation-of-images-in-numpy-and-python
+    """
+    x = np.asarray(x)
+    y = np.asarray(y)
+
+    x0 = np.floor(x).astype(int)
+    x1 = x0 + 1
+    y0 = np.floor(y).astype(int)
+    y1 = y0 + 1
+
+    x0 = np.clip(x0, 0, im.shape[1] - 1)
+    x1 = np.clip(x1, 0, im.shape[1] - 1)
+    y0 = np.clip(y0, 0, im.shape[0] - 1)
+    y1 = np.clip(y1, 0, im.shape[0] - 1)
+
+    Ia = im[y0, x0]
+    Ib = im[y1, x0]
+    Ic = im[y0, x1]
+    Id = im[y1, x1]
+
+    wa = (x1 - x) * (y1 - y)
+    wb = (x1 - x) * (y - y0)
+    wc = (x - x0) * (y1 - y)
+    wd = (x - x0) * (y - y0)
+
+    return wa * Ia + wb * Ib + wc * Ic + wd * Id
+
+def transform_from_pixels_to_world(pixels, depth_map, camera_to_world_transform):
+    pixels = pixels.astype(float)
+    z = bilinear_interpolate(im=depth_map, x=pixels[..., 1], y=pixels[..., 0])
+    z = z.reshape(-1, 1)  # shape [..., 1]
+
+    # form 4D homogenous camera vector to transform - [x * z, y * z, z, 1]
+    # (note that we need to swap the first 2 dimensions of pixels to go from pixel indices
+    # to camera coordinates)
+    cam_pts = [pixels[..., 1:2] * z, pixels[..., 0:1] * z, z, np.ones_like(z)]
+    cam_pts = np.concatenate(cam_pts, axis=-1)  # shape [..., 4]
+
+    # batch matrix multiplication of 4 x 4 matrix and 4 x 1 vectors to do camera to robot frame transform
+    mat_reshape = [1] * len(cam_pts.shape[:-1]) + [4, 4]
+    cam_trans = camera_to_world_transform.reshape(mat_reshape)  # shape [..., 4, 4]
+    points = np.matmul(cam_trans, cam_pts[..., None])[..., 0]  # shape [..., 4]
+    return points[..., :3]
+
 # Configurable subtask states for demonstration collection
 # Cycle starts at "0", then goes through each subtask in this list
 # Final 'l' press after last subtask sends task completion signal
@@ -137,7 +191,7 @@ class KeyboardInputManager:
 input_manager = KeyboardInputManager()
 
 def collect_human_trajectory(
-    env, device, arm, env_configuration, problem_info, remove_directory=[]
+    env, device, arm, env_configuration, problem_info, remove_directory=[], sam3_client=None, args=None
 ):
     """
     Use the device (keyboard or SpaceNav 3D mouse) to collect a demonstration.
@@ -175,6 +229,10 @@ def collect_human_trajectory(
     received_task_completion_signal = False
     env._start_new_episode() # auto-start new episode
 
+    # Visual servoing: target position from SAM3
+    visual_servo_target = None
+    obs = None  # Store observations from previous step
+    world_pos_3d = None
 
 
     while True:
@@ -203,10 +261,134 @@ def collect_human_trajectory(
         # trigger gripper via keyboard; needs to be done after checking if action is None
         action[-1] = 1.0 if input_manager.gripper_trigger_key_pressed.is_set() else -1.0
 
+        # Apply visual servoing if target is set
+        if visual_servo_target is not None and obs is not None:
+            # Get current end-effector position from observations
+            ee_pos_key = "robot0_eef_pos" if "robot0_eef_pos" in obs else "eef_pos"
+            if ee_pos_key in obs:
+                current_ee_pos = obs[ee_pos_key]  # [x, y, z]
+
+                # Calculate position delta: target - current
+                visual_servo_delta = visual_servo_target - current_ee_pos
+
+                # Override the position component of the action (first 3 elements are position delta)
+                # Scale down the delta to avoid large jumps (gain factor)
+                action[0:3] = visual_servo_delta * 0.5
+
+                # print(f"[Visual Servo] Target: {visual_servo_target}, Current EE: {current_ee_pos}, Delta applied: {action[0:3]}")
 
         # Run environment step
 
-        env.step(action)
+        obs, _, _, _ = env.step(action)
+
+        # SAM3-based position estimation
+        if sam3_client is not None and args is not None and count % args.sam3_query_freq == 0 and world_pos_3d is None:
+            try:
+                camera_name = args.camera  # Use the camera specified in command line
+                rgb_key = f"{camera_name}_image"
+                depth_key = f"{camera_name}_depth"
+
+                if rgb_key in obs and depth_key in obs:
+                    # Flip images vertically to correct robosuite's upside-down orientation
+                    rgb_image = obs[rgb_key][::-1]  # Shape: (H, W, 3), uint8
+                    depth_normalized = obs[depth_key][::-1]  # Shape: (H, W, 1), float [0,1]
+
+                    # Send frame to SAM3 server
+                    sent = sam3_client.send_frame(
+                        rgb_image=rgb_image,
+                        sam3_stage=0,  # Use fixed stage for now
+                        prompt=args.sam3_prompt
+                    )
+
+                    if sent:
+                        # Try to receive segmented frame (non-blocking)
+                        mask = sam3_client.receive_segmented_frame()
+
+                        if mask is not None and mask.sum() > 0:
+                            # Convert normalized depth to real depth (meters)
+                            depth_real = get_real_depth_map(env.sim, depth_normalized)
+
+                            # Save depth images for debugging
+                            if args.sam3_debug_dir:
+                                os.makedirs(args.sam3_debug_dir, exist_ok=True)
+
+                                # Save normalized depth (0-1 range) as greyscale
+                                depth_norm_vis = (depth_normalized * 255).astype(np.uint8)
+                                depth_norm_path = os.path.join(args.sam3_debug_dir, f"depth_normalized_step_{count:04d}.png")
+                                cv2.imwrite(depth_norm_path, depth_norm_vis)
+
+                                # Save real depth as greyscale (normalize to visible range)
+                                depth_real_vis = depth_real.squeeze()  # Remove channel dimension
+                                # Normalize to 0-255 for visualization (clip to reasonable range)
+                                depth_min, depth_max = depth_real_vis.min(), depth_real_vis.max()
+                                if depth_max > depth_min:
+                                    depth_real_vis = ((depth_real_vis - depth_min) / (depth_max - depth_min) * 255).astype(np.uint8)
+                                else:
+                                    depth_real_vis = np.zeros_like(depth_real_vis, dtype=np.uint8)
+                                depth_real_path = os.path.join(args.sam3_debug_dir, f"depth_real_step_{count:04d}.png")
+                                cv2.imwrite(depth_real_path, depth_real_vis)
+
+                            # Get camera-to-world transformation matrix
+                            # Camera dimensions (images are 256x256)
+                            camera_height, camera_width = 256, 256
+
+                            # Get full transform matrix (includes intrinsics)
+                            world_to_camera = get_camera_transform_matrix(
+                                env.sim,
+                                camera_name,
+                                camera_height,
+                                camera_width
+                            )
+                            # Invert to get camera-to-world transform
+                            camera_to_world = np.linalg.inv(world_to_camera)
+
+                            # Transform centroid pixel + depth to 3D world coordinates
+                            coords = np.argwhere(mask > 0)
+                            pixels = np.array([coords[:, 0], coords[:, 1]])
+                            world_pos_3d = transform_from_pixels_to_world(
+                                pixels=pixels.T,
+                                depth_map=depth_real[..., 0],
+                                camera_to_world_transform=camera_to_world
+                            )
+
+                            world_pos_3d = np.array([
+                                (np.percentile(world_pos_3d[:, 0], 95) + np.percentile(world_pos_3d[:, 0], 5)) / 2,
+                                (np.percentile(world_pos_3d[:, 1], 95) + np.percentile(world_pos_3d[:, 1], 5)) / 2,
+                                (np.percentile(world_pos_3d[:, 2], 95) + np.percentile(world_pos_3d[:, 2], 5)) / 2,
+                            ])
+
+                            # Extract 3D position
+                            world_x, world_y, world_z = world_pos_3d
+
+                            # Update visual servoing target
+                            visual_servo_target = world_pos_3d.copy()
+
+                            # Print position estimate to console
+                            print(f"\n[SAM3 Step {count}] '{args.sam3_prompt}' Position Estimate:")
+                            print( f"  Global Position: X={world_x:.4f}m, Y={world_y:.4f}m, Z={world_z:.4f}m")
+                            print(f"Expected Global Position: {obs['red_coffee_mug_1_pos']}")
+                            print()
+
+                            # Update visualization markers
+                            try:
+                                # Update green marker to computed position
+                                env.set_indicator_pos("computed_position_marker", [world_x, world_y, world_z])
+
+                                # Update blue marker to expected position
+                                expected_pos = obs['red_coffee_mug_1_pos']
+                                env.set_indicator_pos("expected_position_marker", expected_pos)
+                            except Exception as marker_error:
+                                print(f"Warning: Could not update markers: {marker_error}")
+
+                        else:
+                            print(f"[SAM3 Step {count}] Warning: No valid mask received for '{args.sam3_prompt}'")
+                else:
+                    print(f"[SAM3 Step {count}] Warning: Missing observations {rgb_key} or {depth_key}")
+
+            except Exception as e:
+                print(f"[SAM3 Step {count}] Error: {e}")
+                import traceback
+                traceback.print_exc()
 
         # Cycle through subtasks and update env
         new_subtask, should_send_completion = input_manager.cycle_subtask()
@@ -410,8 +592,45 @@ if __name__ == "__main__":
     parser.add_argument("--vendor-id", type=int, default=9583)
     parser.add_argument("--product-id", type=int, default=50741)
 
-    args = parser.parse_args()
+    # SAM3-based position estimation arguments
+    parser.add_argument(
+        "--enable-sam3",
+        action="store_true",
+        help="Enable SAM3-based object position estimation"
+    )
+    parser.add_argument(
+        "--sam3-send-endpoint",
+        type=str,
+        default="tcp://localhost:5555",
+        help="SAM3 ZMQ send endpoint"
+    )
+    parser.add_argument(
+        "--sam3-recv-endpoint",
+        type=str,
+        default="tcp://localhost:5556",
+        help="SAM3 ZMQ receive endpoint"
+    )
+    parser.add_argument(
+        "--sam3-prompt",
+        type=str,
+        default="yellow and white mug",
+        help="Text prompt for SAM3 segmentation"
+    )
+    parser.add_argument(
+        "--sam3-query-freq",
+        type=int,
+        default=10,
+        help="Query SAM3 every N steps (default: 10)"
+    )
+    parser.add_argument(
+        "--sam3-debug-dir",
+        type=str,
+        default="output_sam3",
+        help="Directory to save SAM3 debug visualizations"
+    )
 
+    args = parser.parse_args()
+    
     # Get controller config
     controller_config = load_controller_config(default_controller=args.controller)
 
@@ -436,16 +655,33 @@ if __name__ == "__main__":
         bddl_file_name=args.bddl_file,
         **config,
         has_renderer=True,
-        has_offscreen_renderer=False,
+        has_offscreen_renderer=not False,
         render_camera=args.camera,
         ignore_done=True,
-        use_camera_obs=False,
+        use_camera_obs=True,
         reward_shaping=True,
         control_freq=20,
+        camera_depths=True
     )
 
-    # Wrap this with visualization wrapper
-    env = VisualizationWrapper(env)
+    # Wrap this with visualization wrapper with markers
+    env = VisualizationWrapper(env, indicator_configs=[
+
+        {
+            "name": "computed_position_marker",
+            "type": "sphere",
+            "size": [0.04],          # 0.05 is good value for visibility
+            "rgba": [0, 1, 0, 1],    # Solid green - computed position from SAM3
+            "pos": [0, 0, -10]       # Start off-screen, updated during runtime
+        },
+        {
+            "name": "expected_position_marker",
+            "type": "sphere",
+            "size": [0.04],          # 0.05 is good value for visibility
+            "rgba": [0, 0, 1, 1],    # Solid blue - expected/ground truth position
+            "pos": [0, 0, -10]       # Start off-screen, updated during runtime
+        }
+    ])
 
     # Grab reference to controller config and convert it to json-encoded string
     env_info = json.dumps(config)
@@ -494,6 +730,31 @@ if __name__ == "__main__":
 
     os.makedirs(new_dir)
 
+    # Initialize SAM3 client if enabled
+    sam3_client = None
+    sam3_stage = 0  # Counter for SAM3 server reset tracking
+
+    if args.enable_sam3:
+        try:
+            sam3_client = SAM3StreamClient(
+                send_endpoint=args.sam3_send_endpoint,
+                recv_endpoint=args.sam3_recv_endpoint,
+                target_size=(256, 256),  # Matches observation size
+                original_size=(256, 256),
+                output_dir=args.sam3_debug_dir
+            )
+            print(f"SAM3 enabled: debug output -> {args.sam3_debug_dir}")
+            print(f"  Query frequency: every {args.sam3_query_freq} steps")
+            print(f"  Segmentation prompt: '{args.sam3_prompt}'")
+
+            # Drain any stale messages from previous runs
+            sam3_client.drain_stale_messages()
+
+        except Exception as e:
+            print(f"Failed to initialize SAM3 client: {e}")
+            print("Continuing without SAM3...")
+            sam3_client = None
+
     # collect demonstrations
 
     remove_directory = []
@@ -501,7 +762,7 @@ if __name__ == "__main__":
     while i < args.num_demonstration:
         print(i)
         saving = collect_human_trajectory(
-            env, device, args.arm, args.config, problem_info, remove_directory
+            env, device, args.arm, args.config, problem_info, remove_directory, sam3_client, args
         )
         if saving:
             print(remove_directory)
@@ -509,3 +770,7 @@ if __name__ == "__main__":
                 tmp_directory, new_dir, env_info, args, remove_directory
             )
             i += 1
+
+    # Cleanup SAM3 client
+    if sam3_client is not None:
+        sam3_client.close()

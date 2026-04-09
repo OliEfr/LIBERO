@@ -77,18 +77,23 @@ class DirectCameraMover:
         self.set_pose(pos, new_rot)
 
     def print_pose(self, camera_name):
+        base_id = env.sim.model.body_name2id("robot0_base")
+        base_pos = env.sim.data.body_xpos[base_id]
+
+
         pos = self.get_pos()
         q = self.get_quat_wxyz()
         print("\n" + "=" * 60)
-        print("For _setup_camera() in env file (Python):")
+        print("Cam pos absolute in world coordianates:")
         print(f"  pos=[{pos[0]}, {pos[1]}, {pos[2]}],")
         print(f"  quat=[{q[0]}, {q[1]}, {q[2]}, {q[3]}],")
         print()
-        print("For scene XML:")
-        print(f'  <camera mode="fixed" name="{camera_name}" '
-              f'pos="{pos[0]} {pos[1]} {pos[2]}" '
-              f'quat="{q[0]} {q[1]} {q[2]} {q[3]}"/>')
+        print("Cam pos relative to base):")
+        print(f"  pos=[{pos[0] - base_pos[0]}, {pos[1] - base_pos[1]}, {pos[2] - base_pos[2]}],")
+        print(f"  quat=[{q[0]}, {q[1]}, {q[2]}, {q[3]}],")
         print("=" * 60)
+
+
 
 
 class KeyboardHandler:
@@ -155,6 +160,9 @@ if __name__ == "__main__":
         control_freq=20,
     )
     env.reset()
+
+    base_id = env.sim.model.body_name2id("robot0_base")
+    print("robot0_base xpos:", env.sim.data.body_xpos[base_id])
 
     # Set up direct camera mover (no XML modification, no env reset)
     cam = DirectCameraMover(env.sim, args.camera)

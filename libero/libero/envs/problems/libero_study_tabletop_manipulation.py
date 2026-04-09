@@ -7,6 +7,8 @@ from libero.libero.envs.predicates import *
 from libero.libero.envs.regions import *
 from libero.libero.envs.utils import rectangle2xyrange
 
+from .constants import SIDEVIEW_OFFSET, SIDEVIEW_QUAT
+
 
 @register_problem
 class Libero_Study_Tabletop_Manipulation(BDDLBaseDomain):
@@ -198,6 +200,17 @@ class Libero_Study_Tabletop_Manipulation(BDDLBaseDomain):
                 0.30484986305236816,
                 0.6380177736282349,
             ],
+        )
+
+
+
+        robot_base_xpos = [-0.75,0.0, 0.912] # known value for this env
+        mujoco_arena.set_camera(
+            camera_name="sideview",
+            pos=[robot_base_xpos[0] + SIDEVIEW_OFFSET[0],
+                robot_base_xpos[1] + SIDEVIEW_OFFSET[1],
+                robot_base_xpos[2] + SIDEVIEW_OFFSET[2]],
+            quat=SIDEVIEW_QUAT,
         )
 
         # For visualization purpose

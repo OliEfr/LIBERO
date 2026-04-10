@@ -1,3 +1,5 @@
+import os
+
 from robosuite.utils.mjcf_utils import new_site
 
 from libero.libero.envs.bddl_base_domain import BDDLBaseDomain, register_problem
@@ -7,7 +9,7 @@ from libero.libero.envs.predicates import *
 from libero.libero.envs.regions import *
 from libero.libero.envs.utils import rectangle2xyrange
 
-from .constants import SIDEVIEW_OFFSET, SIDEVIEW_QUAT
+from .constants import SIDEVIEW_OFFSET, SIDEVIEW_QUAT, SIDEVIEW_CAMERA_OVERRIDES
 
 
 @register_problem
@@ -202,14 +204,19 @@ class Libero_Kitchen_Tabletop_Manipulation(BDDLBaseDomain):
 
 
         robot_base_xpos = [-0.66, 0, 0.912]  # known value for this env
+        bddl_stem = os.path.splitext(os.path.basename(self.bddl_file_name))[0]
+        sideview_offset = SIDEVIEW_OFFSET
+        sideview_quat = SIDEVIEW_QUAT
+        if bddl_stem in SIDEVIEW_CAMERA_OVERRIDES:
+            sideview_offset, sideview_quat = SIDEVIEW_CAMERA_OVERRIDES[bddl_stem]
         mujoco_arena.set_camera(
             camera_name="sideview",
             pos=[
-                robot_base_xpos[0] + SIDEVIEW_OFFSET[0],
-                robot_base_xpos[1] + SIDEVIEW_OFFSET[1],
-                robot_base_xpos[2] + SIDEVIEW_OFFSET[2],
+                robot_base_xpos[0] + sideview_offset[0],
+                robot_base_xpos[1] + sideview_offset[1],
+                robot_base_xpos[2] + sideview_offset[2],
             ],
-            quat=SIDEVIEW_QUAT,
+            quat=sideview_quat,
         )
 
 
